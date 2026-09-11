@@ -1,28 +1,25 @@
-cat > bot.py <<'PY'
 import os
 import sqlite3
-import logging
-from datetime import datetime
-
 import telebot
-from telebot import types
+
 from dotenv import load_dotenv
+from telebot import types
+
+# =========================
+# CONFIG
+# =========================
 
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-SUPERADMIN_ID = int(os.getenv("SUPERADMIN_ID", "0"))
-DB_PATH = os.getenv("DB_PATH", "virangarvpn.db")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "0") or 0)
 
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN داخل .env تنظیم نشده")
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
+    raise RuntimeError("BOT_TOKEN در فایل .env تنظیم نشده است.")
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
+
+DB_FILE = "virangarvpn.db"
 
 
 # =========================
@@ -30,271 +27,260 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 # =========================
 
 def db():
-    con = sqlite3.connect(DB_PATH)
-    con.row_factory = sqlite3.Row
-    return con
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
-def init_db():
-    con = db()
+def create_database():
+    conn = db()
+    cur = conn.cursor()
 
-    con.executescript("""
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY,
-        username TEXT,
-        first_name TEXT,
-        balance INTEGER DEFAULT 0,
-        blocked INTEGER DEFAULT 0,
-        created_at TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS plans (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        volume_gb INTEGER NOT NULL,
-        duration_days INTEGER NOT NULL,
-        devices INTEGER NOT NULL,
-        price INTEGER NOT NULL,
-        active INTEGER DEFAULT 1
-    );
-
-    CREATE TABLE IF NOT EXISTS payments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        plan_id INTEGER,
-        amount INTEGER NOT NULL,
-        method TEXT NOT NULL,
-        status TEXT DEFAULT 'pending',
-        receipt_file_id TEXT,
-        created_at TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS services (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        plan_id INTEGER,
-        status TEXT DEFAULT 'active',
-        config TEXT,
-        expires_at TEXT,
-        created_at TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS transactions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        amount INTEGER NOT NULL,
-        kind TEXT NOT NULL,
-        description TEXT,
-        created_at TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value TEXT
-    );
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER UNIQUE NOT NULL,
+            username TEXT,
+            first_name TEXT,
+            balance INTEGER DEFAULT 0,
+            is_blocked INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
     """)
 
-    if con.execute("SELECT COUNT(*) FROM plans").fetchone()[0] == 0:
-        con.executemany(
-            """
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS plans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            volume_gb INTEGER NOT NULL,
+            duration_days INTEGER NOT NULL,
+            devices INTEGER DEFAULT 1,
+            price INTEGER NOT NULL,
+            active INTEGER DEFAULT 1
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL,
+            method TEXT NOT NULL,
+            receipt_file_id TEXT,
+            status TEXT DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS services (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            plan_id INTEGER,
+            status TEXT DEFAULT 'active',
+            volume_gb INTEGER,
+            duration_days INTEGER,
+            devices INTEGER,
+            expires_at TEXT,
+            config TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL,
+            type TEXT NOT NULL,
+            description TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # پلن‌های اولیه
+    cur.execute("SELECT COUNT(*) FROM plans")
+    count = cur.fetchone()[0]
+
+    if count == 0:
+        cur.execute("""
             INSERT INTO plans
             (name, volume_gb, duration_days, devices, price)
             VALUES (?, ?, ?, ?, ?)
-            """,
-            [
-                ("اقتصادی", 30, 30, 1, 120000),
-                ("حرفه‌ای", 70, 60, 2, 220000),
-                ("پریمیوم", 150, 90, 4, 350000),
-            ]
-        )
+        """, ("اقتصادی", 30, 30, 1, 100000))
 
-    defaults = {
-        "manual_payment": "1",
-        "online_payment": "0",
-        "card_number": "شماره کارت تنظیم نشده",
-        "card_name": "نام صاحب کارت تنظیم نشده",
-    }
+        cur.execute("""
+            INSERT INTO plans
+            (name, volume_gb, duration_days, devices, price)
+            VALUES (?, ?, ?, ?, ?)
+        """, ("حرفه‌ای", 100, 60, 2, 200000))
 
-    for key, value in defaults.items():
-        con.execute(
-            """
-            INSERT OR IGNORE INTO settings(key, value)
-            VALUES (?, ?)
-            """,
-            (key, value)
-        )
+        cur.execute("""
+            INSERT INTO plans
+            (name, volume_gb, duration_days, devices, price)
+            VALUES (?, ?, ?, ?, ?)
+        """, ("ویژه", 200, 90, 3, 350000))
 
-    con.commit()
-    con.close()
+    conn.commit()
+    conn.close()
 
 
 # =========================
-# SETTINGS
+# USERS
 # =========================
 
-def get_setting(key, default=""):
-    con = db()
+def save_user(message):
+    user = message.from_user
 
-    row = con.execute(
-        "SELECT value FROM settings WHERE key=?",
-        (key,)
-    ).fetchone()
+    conn = db()
+    cur = conn.cursor()
 
-    con.close()
+    cur.execute("""
+        INSERT OR IGNORE INTO users
+        (telegram_id, username, first_name)
+        VALUES (?, ?, ?)
+    """, (
+        user.id,
+        user.username or "",
+        user.first_name or ""
+    ))
 
-    if row:
-        return row["value"]
+    cur.execute("""
+        UPDATE users
+        SET username = ?, first_name = ?
+        WHERE telegram_id = ?
+    """, (
+        user.username or "",
+        user.first_name or "",
+        user.id
+    ))
 
-    return default
+    conn.commit()
+    conn.close()
 
 
-def set_setting(key, value):
-    con = db()
+def get_user(telegram_id):
+    conn = db()
+    cur = conn.cursor()
 
-    con.execute(
-        """
-        INSERT INTO settings(key, value)
-        VALUES (?, ?)
-        ON CONFLICT(key)
-        DO UPDATE SET value=excluded.value
-        """,
-        (key, value)
+    cur.execute("""
+        SELECT *
+        FROM users
+        WHERE telegram_id = ?
+    """, (telegram_id,))
+
+    user = cur.fetchone()
+    conn.close()
+
+    return user
+
+
+def is_blocked(telegram_id):
+    user = get_user(telegram_id)
+    return user and user["is_blocked"] == 1
+
+
+# =========================
+# USER MENU
+# =========================
+
+def user_menu():
+    keyboard = types.ReplyKeyboardMarkup(
+        resize_keyboard=True,
+        row_width=2
     )
 
-    con.commit()
-    con.close()
-
-
-# =========================
-# USER
-# =========================
-
-def save_user(user):
-    con = db()
-
-    con.execute(
-        """
-        INSERT INTO users
-        (id, username, first_name, created_at)
-        VALUES (?, ?, ?, ?)
-
-        ON CONFLICT(id)
-        DO UPDATE SET
-            username=excluded.username,
-            first_name=excluded.first_name
-        """,
-        (
-            user.id,
-            user.username or "",
-            user.first_name or "",
-            datetime.utcnow().isoformat()
-        )
+    keyboard.add(
+        types.KeyboardButton("🛒 خرید VPN"),
+        types.KeyboardButton("🛡 سرویس‌های من")
     )
 
-    con.commit()
+    keyboard.add(
+        types.KeyboardButton("🎁 تست رایگان"),
+        types.KeyboardButton("💰 کیف پول")
+    )
 
-    row = con.execute(
-        "SELECT * FROM users WHERE id=?",
-        (user.id,)
-    ).fetchone()
+    keyboard.add(
+        types.KeyboardButton("📜 تراکنش‌های من"),
+        types.KeyboardButton("🤝 پنل نمایندگی")
+    )
 
-    con.close()
+    keyboard.add(
+        types.KeyboardButton("🎫 خرید لایسنس ربات"),
+        types.KeyboardButton("🆘 پشتیبانی")
+    )
 
-    return row
+    keyboard.add(
+        types.KeyboardButton("📚 راهنما"),
+        types.KeyboardButton("⚙️ حساب کاربری")
+    )
 
-
-def is_blocked(user_id):
-    con = db()
-
-    row = con.execute(
-        "SELECT blocked FROM users WHERE id=?",
-        (user_id,)
-    ).fetchone()
-
-    con.close()
-
-    return bool(row and row["blocked"])
+    return keyboard
 
 
 # =========================
-# KEYBOARDS
+# ADMIN MENU
 # =========================
 
-def menu():
-    markup = types.InlineKeyboardMarkup()
+def admin_menu():
+    keyboard = types.InlineKeyboardMarkup(row_width=2)
 
-    markup.row(
+    keyboard.add(
         types.InlineKeyboardButton(
-            "🛒 خرید VPN",
-            callback_data="buy"
+            "📊 داشبورد",
+            callback_data="admin_dashboard"
         ),
         types.InlineKeyboardButton(
-            "🛡 سرویس‌های من",
-            callback_data="services"
+            "👥 کاربران",
+            callback_data="admin_users"
         )
     )
 
-    markup.row(
+    keyboard.add(
+        types.InlineKeyboardButton(
+            "💎 پلن‌های VPN",
+            callback_data="admin_plans"
+        ),
+        types.InlineKeyboardButton(
+            "📦 سرویس‌ها",
+            callback_data="admin_services"
+        )
+    )
+
+    keyboard.add(
+        types.InlineKeyboardButton(
+            "💰 پرداخت‌ها",
+            callback_data="admin_payments"
+        ),
+        types.InlineKeyboardButton(
+            "🖥 پنل‌ها",
+            callback_data="admin_panels"
+        )
+    )
+
+    keyboard.add(
         types.InlineKeyboardButton(
             "🎁 تست رایگان",
-            callback_data="trial"
+            callback_data="admin_trial"
         ),
         types.InlineKeyboardButton(
-            "💰 کیف پول",
-            callback_data="wallet"
+            "🤝 نمایندگان",
+            callback_data="admin_resellers"
         )
     )
 
-    markup.row(
+    keyboard.add(
         types.InlineKeyboardButton(
-            "📜 تراکنش‌های من",
-            callback_data="transactions"
-        )
-    )
-
-    markup.row(
-        types.InlineKeyboardButton(
-            "🤝 پنل نمایندگی",
-            callback_data="reseller"
+            "📢 ارسال همگانی",
+            callback_data="admin_broadcast"
         ),
         types.InlineKeyboardButton(
-            "🎫 لایسنس ربات",
-            callback_data="license"
+            "⚙️ تنظیمات",
+            callback_data="admin_settings"
         )
     )
 
-    markup.row(
-        types.InlineKeyboardButton(
-            "🆘 پشتیبانی",
-            callback_data="support"
-        ),
-        types.InlineKeyboardButton(
-            "📚 راهنما",
-            callback_data="guide"
-        )
-    )
-
-    markup.row(
-        types.InlineKeyboardButton(
-            "⚙️ حساب کاربری",
-            callback_data="account"
-        )
-    )
-
-    return markup
-
-
-def back_button():
-    markup = types.InlineKeyboardMarkup()
-
-    markup.add(
-        types.InlineKeyboardButton(
-            "🏠 منوی اصلی",
-            callback_data="home"
-        )
-    )
-
-    return markup
+    return keyboard
 
 
 # =========================
@@ -303,1031 +289,672 @@ def back_button():
 
 @bot.message_handler(commands=["start"])
 def start(message):
+    save_user(message)
 
-    user = save_user(message.from_user)
-
-    if user["blocked"]:
+    if is_blocked(message.from_user.id):
         bot.send_message(
             message.chat.id,
-            "⛔ حساب شما مسدود است."
+            "🚫 حساب شما مسدود شده است."
         )
         return
+
+    text = (
+        "🔥 <b>به VirangarVPN خوش آمدید</b>\n\n"
+        "🚀 خرید و مدیریت سرویس VPN\n"
+        "⚡️ سریع، ساده و حرفه‌ای\n\n"
+        "👇 از منوی زیر انتخاب کنید."
+    )
 
     bot.send_message(
         message.chat.id,
-        """
-🔥 <b>به VirangarVPN خوش آمدید</b>
-
-⚡ سرویس سریع و پایدار خودت رو انتخاب کن.
-
-👇 از منوی زیر شروع کن:
-""",
-        reply_markup=menu()
+        text,
+        reply_markup=user_menu()
     )
 
 
 # =========================
-# CALLBACKS
+# BUY VPN
 # =========================
 
-@bot.callback_query_handler(func=lambda call: True)
-def callbacks(call):
+@bot.message_handler(func=lambda m: m.text == "🛒 خرید VPN")
+def buy_vpn(message):
+    save_user(message)
 
-    user_id = call.from_user.id
-    data = call.data
+    conn = db()
+    cur = conn.cursor()
 
-    try:
-        bot.answer_callback_query(call.id)
-    except:
-        pass
+    cur.execute("""
+        SELECT *
+        FROM plans
+        WHERE active = 1
+        ORDER BY id
+    """)
 
-    # HOME
-    if data == "home":
+    plans = cur.fetchall()
+    conn.close()
 
-        bot.edit_message_text(
-            "🏠 <b>منوی اصلی</b>",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=menu()
+    if not plans:
+        bot.send_message(
+            message.chat.id,
+            "❌ در حال حاضر پلنی برای فروش وجود ندارد."
         )
-
         return
 
-    # BUY
-    if data == "buy":
+    keyboard = types.InlineKeyboardMarkup(row_width=1)
 
-        con = db()
-
-        plans = con.execute(
-            """
-            SELECT *
-            FROM plans
-            WHERE active=1
-            ORDER BY id
-            """
-        ).fetchall()
-
-        con.close()
-
-        markup = types.InlineKeyboardMarkup()
-
-        for plan in plans:
-
-            markup.add(
-                types.InlineKeyboardButton(
-                    f"💎 {plan['name']} | {plan['volume_gb']}GB | {plan['duration_days']} روز | {plan['price']:,}",
-                    callback_data=f"plan:{plan['id']}"
-                )
-            )
-
-        markup.add(
+    for plan in plans:
+        keyboard.add(
             types.InlineKeyboardButton(
-                "🔙 بازگشت",
-                callback_data="home"
+                f"💎 {plan['name']} | {plan['price']:,} تومان",
+                callback_data=f"plan_{plan['id']}"
             )
         )
 
-        bot.edit_message_text(
-            "🛒 <b>انتخاب پلن VPN</b>\n\nیکی از پلن‌ها را انتخاب کن:",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=markup
-        )
-
-        return
-
-    # PLAN
-    if data.startswith("plan:"):
-
-        plan_id = int(data.split(":")[1])
-
-        con = db()
-
-        plan = con.execute(
-            "SELECT * FROM plans WHERE id=? AND active=1",
-            (plan_id,)
-        ).fetchone()
-
-        con.close()
-
-        if not plan:
-
-            bot.answer_callback_query(
-                call.id,
-                "پلن پیدا نشد",
-                show_alert=True
-            )
-
-            return
-
-        text = f"""
-💎 <b>{plan['name']}</b>
-
-📦 حجم: {plan['volume_gb']} گیگ
-⏳ مدت: {plan['duration_days']} روز
-📱 دستگاه: {plan['devices']}
-💰 قیمت: <b>{plan['price']:,} تومان</b>
-
-روش پرداخت را انتخاب کن:
-"""
-
-        markup = types.InlineKeyboardMarkup()
-
-        if get_setting("manual_payment") == "1":
-
-            markup.add(
-                types.InlineKeyboardButton(
-                    "💳 کارت‌به‌کارت",
-                    callback_data=f"manual:{plan_id}"
-                )
-            )
-
-        if get_setting("online_payment") == "1":
-
-            markup.add(
-                types.InlineKeyboardButton(
-                    "🌐 پرداخت آنلاین",
-                    callback_data=f"online:{plan_id}"
-                )
-            )
-
-        markup.add(
-            types.InlineKeyboardButton(
-                "🔙 برگشت",
-                callback_data="buy"
-            )
-        )
-
-        bot.edit_message_text(
-            text,
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=markup
-        )
-
-        return
-
-    # MANUAL PAYMENT
-    if data.startswith("manual:"):
-
-        plan_id = int(data.split(":")[1])
-
-        con = db()
-
-        plan = con.execute(
-            "SELECT * FROM plans WHERE id=?",
-            (plan_id,)
-        ).fetchone()
-
-        con.close()
-
-        if not plan:
-            return
-
-        text = f"""
-💳 <b>پرداخت کارت‌به‌کارت</b>
-
-💰 مبلغ:
-<b>{plan['price']:,} تومان</b>
-
-💳 شماره کارت:
-<code>{get_setting('card_number')}</code>
-
-👤 به نام:
-<b>{get_setting('card_name')}</b>
-
-بعد از انتقال وجه، <b>عکس رسید</b> را همینجا ارسال کن.
-"""
-
-        bot.send_message(
-            call.message.chat.id,
-            text
-        )
-
-        bot.register_next_step_handler_by_chat_id(
-            call.message.chat.id,
-            lambda message: receive_receipt(message, plan_id)
-        )
-
-        return
-
-    # ONLINE
-    if data.startswith("online:"):
-
-        bot.send_message(
-            call.message.chat.id,
-            "🌐 درگاه آنلاین هنوز به API درگاه متصل نشده است."
-        )
-
-        return
-
-    # SERVICES
-    if data == "services":
-
-        con = db()
-
-        services = con.execute(
-            """
-            SELECT *
-            FROM services
-            WHERE user_id=?
-            AND status='active'
-            ORDER BY id DESC
-            """,
-            (user_id,)
-        ).fetchall()
-
-        con.close()
-
-        if not services:
-
-            bot.edit_message_text(
-                """
-🛡 <b>سرویس‌های من</b>
-
-❌ سرویس فعالی نداری.
-""",
-                call.message.chat.id,
-                call.message.message_id,
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton(
-                        "🛒 خرید VPN",
-                        callback_data="buy"
-                    ),
-                    types.InlineKeyboardButton(
-                        "🏠 خانه",
-                        callback_data="home"
-                    )
-                )
-            )
-
-            return
-
-        text = "🛡 <b>سرویس‌های من</b>\n\n"
-
-        for service in services:
-
-            text += f"""
-🔹 <b>سرویس #{service['id']}</b>
-📅 انقضا: {service['expires_at'] or '-'}
-📡 وضعیت: فعال
-
-"""
-
-        bot.edit_message_text(
-            text,
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=back_button()
-        )
-
-        return
-
-    # WALLET
-    if data == "wallet":
-
-        con = db()
-
-        user = con.execute(
-            "SELECT balance FROM users WHERE id=?",
-            (user_id,)
-        ).fetchone()
-
-        con.close()
-
-        balance = user["balance"] if user else 0
-
-        bot.edit_message_text(
-            f"""
-💰 <b>کیف پول</b>
-
-موجودی فعلی:
-
-💵 <b>{balance:,} تومان</b>
-""",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=back_button()
-        )
-
-        return
-
-    # TRANSACTIONS
-    if data == "transactions":
-
-        con = db()
-
-        transactions = con.execute(
-            """
-            SELECT *
-            FROM transactions
-            WHERE user_id=?
-            ORDER BY id DESC
-            LIMIT 20
-            """,
-            (user_id,)
-        ).fetchall()
-
-        con.close()
-
-        text = "📜 <b>تراکنش‌های من</b>\n\n"
-
-        if not transactions:
-
-            text += "❌ تراکنشی ثبت نشده."
-
-        else:
-
-            for tx in transactions:
-
-                text += f"""
-#{tx['id']}
-💰 {tx['amount']:,} تومان
-📌 {tx['kind']}
-📝 {tx['description'] or '-'}
-━━━━━━━━━━━━
-"""
-
-        bot.edit_message_text(
-            text,
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=back_button()
-        )
-
-        return
-
-    # TRIAL
-    if data == "trial":
-
-        bot.edit_message_text(
-            """
-🎁 <b>تست رایگان</b>
-
-فعلاً سرویس تست رایگان فعال نشده است.
-""",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=back_button()
-        )
-
-        return
-
-    # RESELLER
-    if data == "reseller":
-
-        bot.edit_message_text(
-            """
-🤝 <b>پنل نمایندگی</b>
-
-پنل نمایندگی از همین بخش مدیریت می‌شود.
-""",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=back_button()
-        )
-
-        return
-
-    # LICENSE
-    if data == "license":
-
-        bot.edit_message_text(
-            """
-🎫 <b>لایسنس ربات</b>
-
-پلن‌های لایسنس در این بخش قرار می‌گیرند.
-""",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=back_button()
-        )
-
-        return
-
-    # SUPPORT
-    if data == "support":
-
-        bot.edit_message_text(
-            """
-🆘 <b>پشتیبانی</b>
-
-پیام خودت را برای پشتیبانی ارسال کن.
-""",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=back_button()
-        )
-
-        return
-
-    # GUIDE
-    if data == "guide":
-
-        bot.edit_message_text(
-            """
-📚 <b>راهنما</b>
-
-1️⃣ پلن VPN را انتخاب کن.
-
-2️⃣ پرداخت را انجام بده.
-
-3️⃣ بعد از تأیید، سرویس برایت ساخته می‌شود.
-
-4️⃣ کانفیگ سرویس را دریافت می‌کنی.
-""",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=back_button()
-        )
-
-        return
-
-    # ACCOUNT
-    if data == "account":
-
-        user = save_user(call.from_user)
-
-        bot.edit_message_text(
-            f"""
-⚙️ <b>حساب کاربری</b>
-
-🆔 شناسه:
-<code>{user_id}</code>
-
-👤 username:
-@{user['username'] or '-'}
-
-💰 موجودی:
-{user['balance']:,} تومان
-""",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=back_button()
-        )
-
-        return
-
-    # =========================
-    # ADMIN
-    # =========================
-
-    if user_id != SUPERADMIN_ID:
-        return
-
-    if data == "admin":
-
-        admin_menu(call.message)
-
-        return
-
-    if data == "adm_stats":
-
-        con = db()
-
-        users = con.execute(
-            "SELECT COUNT(*) AS c FROM users"
-        ).fetchone()["c"]
-
-        services = con.execute(
-            "SELECT COUNT(*) AS c FROM services WHERE status='active'"
-        ).fetchone()["c"]
-
-        payments = con.execute(
-            "SELECT COUNT(*) AS c FROM payments"
-        ).fetchone()["c"]
-
-        con.close()
-
-        bot.edit_message_text(
-            f"""
-📊 <b>آمار ربات</b>
-
-👥 کاربران: {users}
-🛡 سرویس فعال: {services}
-💳 پرداخت‌ها: {payments}
-""",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=admin_back()
-        )
-
-        return
-
-    if data == "adm_payment":
-
-        text = f"""
-💳 <b>تنظیمات پرداخت</b>
-
-کارت‌به‌کارت:
-{'✅ فعال' if get_setting('manual_payment') == '1' else '❌ خاموش'}
-
-پرداخت آنلاین:
-{'✅ فعال' if get_setting('online_payment') == '1' else '❌ خاموش'}
-
-💳 کارت:
-<code>{get_setting('card_number')}</code>
-
-👤 نام:
-{get_setting('card_name')}
-"""
-
-        markup = types.InlineKeyboardMarkup()
-
-        markup.add(
-            types.InlineKeyboardButton(
-                "💳 تغییر شماره کارت",
-                callback_data="set_card"
-            )
-        )
-
-        markup.add(
-            types.InlineKeyboardButton(
-                "👤 تغییر نام کارت",
-                callback_data="set_card_name"
-            )
-        )
-
-        markup.add(
-            types.InlineKeyboardButton(
-                "🔙 بازگشت",
-                callback_data="admin"
-            )
-        )
-
-        bot.edit_message_text(
-            text,
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=markup
-        )
-
-        return
-
-    if data == "set_card":
-
-        bot.send_message(
-            user_id,
-            "💳 شماره کارت جدید را ارسال کن:"
-        )
-
-        bot.register_next_step_handler_by_chat_id(
-            user_id,
-            save_card_number
-        )
-
-        return
-
-    if data == "set_card_name":
-
-        bot.send_message(
-            user_id,
-            "👤 نام صاحب کارت را ارسال کن:"
-        )
-
-        bot.register_next_step_handler_by_chat_id(
-            user_id,
-            save_card_name
-        )
-
-        return
-
-    if data == "adm_users":
-
-        con = db()
-
-        count = con.execute(
-            "SELECT COUNT(*) AS c FROM users"
-        ).fetchone()["c"]
-
-        con.close()
-
-        bot.edit_message_text(
-            f"""
-👥 <b>کاربران</b>
-
-تعداد کاربران:
-<b>{count}</b>
-""",
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=admin_back()
-        )
-
-        return
-
-    if data == "adm_plans":
-
-        con = db()
-
-        plans = con.execute(
-            "SELECT * FROM plans ORDER BY id"
-        ).fetchall()
-
-        con.close()
-
-        text = "💎 <b>پلن‌ها</b>\n\n"
-
-        for plan in plans:
-
-            text += f"""
-#{plan['id']} - {plan['name']}
-📦 {plan['volume_gb']}GB
-⏳ {plan['duration_days']} روز
-📱 {plan['devices']} دستگاه
-💰 {plan['price']:,} تومان
-
-"""
-
-        bot.edit_message_text(
-            text,
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=admin_back()
-        )
-
-        return
-
-    if data == "adm_test":
-
-        bot.send_message(
-            user_id,
-            "✅ ربات، دیتابیس و Callback Handler فعال هستند."
-        )
-
-        return
-
-    # APPROVE PAYMENT
-    if data.startswith("approve:"):
-
-        payment_id = int(data.split(":")[1])
-
-        approve_payment(payment_id)
-
-        bot.send_message(
-            user_id,
-            f"✅ پرداخت #{payment_id} تأیید شد."
-        )
-
-        return
-
-    # REJECT PAYMENT
-    if data.startswith("reject:"):
-
-        payment_id = int(data.split(":")[1])
-
-        reject_payment(payment_id)
-
-        bot.send_message(
-            user_id,
-            f"❌ پرداخت #{payment_id} رد شد."
-        )
-
-        return
-
-
-# =========================
-# ADMIN MENU
-# =========================
-
-def admin_menu(message):
-
-    markup = types.InlineKeyboardMarkup()
-
-    markup.row(
+    keyboard.add(
         types.InlineKeyboardButton(
-            "📊 آمار",
-            callback_data="adm_stats"
-        ),
-        types.InlineKeyboardButton(
-            "👥 کاربران",
-            callback_data="adm_users"
-        )
-    )
-
-    markup.row(
-        types.InlineKeyboardButton(
-            "💎 پلن‌ها",
-            callback_data="adm_plans"
-        ),
-        types.InlineKeyboardButton(
-            "💳 پرداخت",
-            callback_data="adm_payment"
-        )
-    )
-
-    markup.row(
-        types.InlineKeyboardButton(
-            "🧪 تست سیستم",
-            callback_data="adm_test"
+            "❌ بستن",
+            callback_data="close"
         )
     )
 
     bot.send_message(
         message.chat.id,
-        "👑 <b>پنل مدیریت VirangarVPN</b>",
-        reply_markup=markup
+        "💎 <b>انتخاب پلن VPN</b>\n\n"
+        "پلن موردنظر خودت رو انتخاب کن:",
+        reply_markup=keyboard
     )
 
 
-def admin_back():
+# =========================
+# PLAN CALLBACK
+# =========================
 
-    markup = types.InlineKeyboardMarkup()
+@bot.callback_query_handler(
+    func=lambda call: call.data.startswith("plan_")
+)
+def plan_selected(call):
+    plan_id = int(call.data.split("_")[1])
 
-    markup.add(
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        "SELECT * FROM plans WHERE id = ? AND active = 1",
+        (plan_id,)
+    )
+
+    plan = cur.fetchone()
+    conn.close()
+
+    if not plan:
+        bot.answer_callback_query(
+            call.id,
+            "پلن پیدا نشد."
+        )
+        return
+
+    text = (
+        f"💎 <b>{plan['name']}</b>\n\n"
+        f"📦 حجم: {plan['volume_gb']} GB\n"
+        f"⏳ مدت: {plan['duration_days']} روز\n"
+        f"📱 دستگاه: {plan['devices']}\n"
+        f"💰 قیمت: {plan['price']:,} تومان\n\n"
+        "روش پرداخت را انتخاب کنید:"
+    )
+
+    keyboard = types.InlineKeyboardMarkup(row_width=1)
+
+    keyboard.add(
         types.InlineKeyboardButton(
-            "👑 پنل مدیریت",
-            callback_data="admin"
+            "💳 کارت به کارت",
+            callback_data=f"cardpay_{plan_id}"
         )
     )
 
-    return markup
+    keyboard.add(
+        types.InlineKeyboardButton(
+            "🌐 پرداخت آنلاین",
+            callback_data=f"onlinepay_{plan_id}"
+        )
+    )
 
+    keyboard.add(
+        types.InlineKeyboardButton(
+            "🔙 بازگشت",
+            callback_data="back_buy"
+        )
+    )
+
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=keyboard
+    )
+
+    bot.answer_callback_query(call.id)
+
+
+# =========================
+# CARD PAYMENT
+# =========================
+
+@bot.callback_query_handler(
+    func=lambda call: call.data.startswith("cardpay_")
+)
+def card_payment(call):
+    plan_id = int(call.data.split("_")[1])
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute(
+        "SELECT * FROM plans WHERE id = ?",
+        (plan_id,)
+    )
+
+    plan = cur.fetchone()
+    conn.close()
+
+    card_number = os.getenv("CARD_NUMBER", "").strip()
+    card_holder = os.getenv("CARD_HOLDER", "").strip()
+
+    if not card_number:
+        bot.answer_callback_query(
+            call.id,
+            "پرداخت کارت به کارت فعال نیست."
+        )
+        return
+
+    text = (
+        "💳 <b>پرداخت کارت به کارت</b>\n\n"
+        f"💰 مبلغ: <b>{plan['price']:,} تومان</b>\n\n"
+        f"💳 شماره کارت:\n"
+        f"<code>{card_number}</code>\n\n"
+        f"👤 به نام:\n"
+        f"<b>{card_holder}</b>\n\n"
+        "بعد از انتقال وجه، تصویر رسید را همینجا ارسال کنید."
+    )
+
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id
+    )
+
+    bot.answer_callback_query(call.id)
+
+    bot.send_message(
+        call.message.chat.id,
+        f"🧾 برای ثبت رسید، همینجا عکس پرداخت را ارسال کنید.\n\n"
+        f"شناسه پلن: <code>{plan_id}</code>"
+    )
+
+
+# =========================
+# ONLINE PAYMENT
+# =========================
+
+@bot.callback_query_handler(
+    func=lambda call: call.data.startswith("onlinepay_")
+)
+def online_payment(call):
+    bot.answer_callback_query(call.id)
+
+    bot.send_message(
+        call.message.chat.id,
+        "🌐 <b>پرداخت آنلاین</b>\n\n"
+        "⏳ درگاه پرداخت هنوز به ربات متصل نشده است.\n\n"
+        "بعد از اتصال درگاه، پرداخت و تأیید به‌صورت خودکار انجام می‌شود."
+    )
+
+
+# =========================
+# MY SERVICES
+# =========================
+
+@bot.message_handler(func=lambda m: m.text == "🛡 سرویس‌های من")
+def my_services(message):
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT *
+        FROM services
+        WHERE user_id = ?
+        ORDER BY id DESC
+    """, (message.from_user.id,))
+
+    services = cur.fetchall()
+    conn.close()
+
+    if not services:
+        bot.send_message(
+            message.chat.id,
+            "🛡 <b>سرویس‌های من</b>\n\n"
+            "هنوز سرویس فعالی نداری."
+        )
+        return
+
+    lines = ["🛡 <b>سرویس‌های من</b>\n"]
+
+    for service in services:
+        lines.append(
+            f"🔹 سرویس #{service['id']}\n"
+            f"📦 حجم: {service['volume_gb']} GB\n"
+            f"⏳ مدت: {service['duration_days']} روز\n"
+            f"📱 دستگاه: {service['devices']}\n"
+            f"📌 وضعیت: {service['status']}\n"
+        )
+
+    bot.send_message(
+        message.chat.id,
+        "\n".join(lines)
+    )
+
+
+# =========================
+# FREE TRIAL
+# =========================
+
+@bot.message_handler(func=lambda m: m.text == "🎁 تست رایگان")
+def free_trial(message):
+    bot.send_message(
+        message.chat.id,
+        "🎁 <b>تست رایگان</b>\n\n"
+        "تنظیمات تست رایگان از پنل مدیریت انجام می‌شود.\n\n"
+        "⏳ این بخش در مرحله اتصال به PasarGuard فعال می‌شود."
+    )
+
+
+# =========================
+# WALLET
+# =========================
+
+@bot.message_handler(func=lambda m: m.text == "💰 کیف پول")
+def wallet(message):
+    user = get_user(message.from_user.id)
+
+    balance = user["balance"] if user else 0
+
+    keyboard = types.InlineKeyboardMarkup()
+
+    keyboard.add(
+        types.InlineKeyboardButton(
+            "➕ شارژ حساب",
+            callback_data="wallet_charge"
+        )
+    )
+
+    keyboard.add(
+        types.InlineKeyboardButton(
+            "📜 تراکنش‌ها",
+            callback_data="wallet_transactions"
+        )
+    )
+
+    bot.send_message(
+        message.chat.id,
+        f"💰 <b>کیف پول من</b>\n\n"
+        f"💵 موجودی: <b>{balance:,} تومان</b>",
+        reply_markup=keyboard
+    )
+
+
+# =========================
+# TRANSACTIONS
+# =========================
+
+@bot.message_handler(func=lambda m: m.text == "📜 تراکنش‌های من")
+def transactions(message):
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT *
+        FROM transactions
+        WHERE user_id = ?
+        ORDER BY id DESC
+        LIMIT 20
+    """, (message.from_user.id,))
+
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        bot.send_message(
+            message.chat.id,
+            "📜 هنوز تراکنشی ثبت نشده است."
+        )
+        return
+
+    lines = ["📜 <b>تراکنش‌های من</b>\n"]
+
+    for row in rows:
+        sign = "+" if row["amount"] >= 0 else ""
+
+        lines.append(
+            f"💰 {sign}{row['amount']:,} تومان\n"
+            f"📝 {row['description'] or row['type']}\n"
+            f"🕐 {row['created_at']}\n"
+        )
+
+    bot.send_message(
+        message.chat.id,
+        "\n".join(lines)
+    )
+
+
+# =========================
+# RESELLER
+# =========================
+
+@bot.message_handler(func=lambda m: m.text == "🤝 پنل نمایندگی")
+def reseller_panel(message):
+    bot.send_message(
+        message.chat.id,
+        "🤝 <b>پنل نمایندگی</b>\n\n"
+        "از این بخش می‌توانید پنل نمایندگی خریداری کرده و "
+        "کاربران و سرویس‌های خودتان را مدیریت کنید.\n\n"
+        "⏳ بخش نمایندگی در مرحله بعد تکمیل می‌شود."
+    )
+
+
+# =========================
+# LICENSE
+# =========================
+
+@bot.message_handler(func=lambda m: m.text == "🎫 خرید لایسنس ربات")
+def bot_license(message):
+    bot.send_message(
+        message.chat.id,
+        "🎫 <b>لایسنس ربات</b>\n\n"
+        "پلن‌های لایسنس در این بخش قرار می‌گیرند."
+    )
+
+
+# =========================
+# SUPPORT
+# =========================
+
+@bot.message_handler(func=lambda m: m.text == "🆘 پشتیبانی")
+def support(message):
+    support_username = os.getenv(
+        "SUPPORT_USERNAME",
+        ""
+    ).strip()
+
+    if support_username:
+        bot.send_message(
+            message.chat.id,
+            f"🆘 <b>پشتیبانی</b>\n\n"
+            f"برای ارتباط با پشتیبانی:\n"
+            f"@{support_username.lstrip('@')}"
+        )
+    else:
+        bot.send_message(
+            message.chat.id,
+            "🆘 پشتیبانی\n\n"
+            "آیدی پشتیبانی هنوز تنظیم نشده است."
+        )
+
+
+# =========================
+# GUIDE
+# =========================
+
+@bot.message_handler(func=lambda m: m.text == "📚 راهنما")
+def guide(message):
+    bot.send_message(
+        message.chat.id,
+        "📚 <b>راهنمای VirangarVPN</b>\n\n"
+        "🛒 برای خرید، گزینه خرید VPN را بزنید.\n"
+        "🛡 برای مشاهده سرویس‌ها، سرویس‌های من را بزنید.\n"
+        "💰 برای مشاهده موجودی، کیف پول را بزنید.\n"
+        "🆘 برای ارتباط با پشتیبانی، پشتیبانی را انتخاب کنید."
+    )
+
+
+# =========================
+# ACCOUNT
+# =========================
+
+@bot.message_handler(func=lambda m: m.text == "⚙️ حساب کاربری")
+def account(message):
+    user = get_user(message.from_user.id)
+
+    if not user:
+        save_user(message)
+        user = get_user(message.from_user.id)
+
+    username = (
+        f"@{user['username']}"
+        if user["username"]
+        else "ندارد"
+    )
+
+    bot.send_message(
+        message.chat.id,
+        "⚙️ <b>حساب کاربری</b>\n\n"
+        f"🆔 آیدی: <code>{user['telegram_id']}</code>\n"
+        f"👤 نام کاربری: {username}\n"
+        f"💰 موجودی: {user['balance']:,} تومان"
+    )
+
+
+# =========================
+# ADMIN
+# =========================
 
 @bot.message_handler(commands=["admin"])
 def admin_command(message):
-
-    if message.from_user.id != SUPERADMIN_ID:
-        return
-
-    admin_menu(message)
-
-
-# =========================
-# PAYMENT
-# =========================
-
-def receive_receipt(message, plan_id):
-
-    if not message.photo:
-
-        bot.send_message(
-            message.chat.id,
-            "❌ لطفاً فقط عکس رسید را ارسال کن."
+    if message.from_user.id != SUPER_ADMIN_ID:
+        bot.reply_to(
+            message,
+            "🚫 دسترسی ندارید."
         )
-
         return
-
-    con = db()
-
-    plan = con.execute(
-        "SELECT * FROM plans WHERE id=?",
-        (plan_id,)
-    ).fetchone()
-
-    if not plan:
-        con.close()
-        return
-
-    cursor = con.execute(
-        """
-        INSERT INTO payments
-        (
-            user_id,
-            plan_id,
-            amount,
-            method,
-            status,
-            receipt_file_id,
-            created_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            message.from_user.id,
-            plan_id,
-            plan["price"],
-            "manual",
-            "pending",
-            message.photo[-1].file_id,
-            datetime.utcnow().isoformat()
-        )
-    )
-
-    payment_id = cursor.lastrowid
-
-    con.commit()
-    con.close()
 
     bot.send_message(
         message.chat.id,
-        f"""
-⏳ <b>رسید ثبت شد.</b>
-
-شماره پرداخت:
-<code>#{payment_id}</code>
-
-بعد از بررسی مدیریت، نتیجه برایت ارسال می‌شود.
-"""
+        "👑 <b>پنل مدیریت VirangarVPN</b>\n\n"
+        "بخش موردنظر را انتخاب کنید:",
+        reply_markup=admin_menu()
     )
 
-    if SUPERADMIN_ID:
 
-        markup = types.InlineKeyboardMarkup()
+# =========================
+# ADMIN CALLBACKS
+# =========================
 
-        markup.row(
-            types.InlineKeyboardButton(
-                "✅ تأیید",
-                callback_data=f"approve:{payment_id}"
-            ),
-            types.InlineKeyboardButton(
-                "❌ رد",
-                callback_data=f"reject:{payment_id}"
+@bot.callback_query_handler(
+    func=lambda call: call.data.startswith("admin_")
+)
+def admin_callbacks(call):
+
+    if call.from_user.id != SUPER_ADMIN_ID:
+        bot.answer_callback_query(
+            call.id,
+            "🚫 دسترسی ندارید.",
+            show_alert=True
+        )
+        return
+
+    data = call.data
+
+    if data == "admin_dashboard":
+        conn = db()
+        cur = conn.cursor()
+
+        cur.execute("SELECT COUNT(*) FROM users")
+        users = cur.fetchone()[0]
+
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM services
+            WHERE status = 'active'
+        """)
+        services = cur.fetchone()[0]
+
+        cur.execute("""
+            SELECT COALESCE(SUM(amount), 0)
+            FROM transactions
+            WHERE amount > 0
+        """)
+        revenue = cur.fetchone()[0]
+
+        conn.close()
+
+        bot.edit_message_text(
+            "📊 <b>داشبورد</b>\n\n"
+            f"👥 کاربران: {users}\n"
+            f"🛡 سرویس‌های فعال: {services}\n"
+            f"💰 گردش مالی ثبت‌شده: {revenue:,} تومان",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=admin_menu()
+        )
+
+    elif data == "admin_users":
+        conn = db()
+        cur = conn.cursor()
+
+        cur.execute("SELECT COUNT(*) FROM users")
+        count = cur.fetchone()[0]
+
+        conn.close()
+
+        bot.answer_callback_query(call.id)
+
+        bot.send_message(
+            call.message.chat.id,
+            f"👥 <b>کاربران</b>\n\n"
+            f"تعداد کاربران ثبت‌شده: <b>{count}</b>"
+        )
+
+    elif data == "admin_plans":
+        conn = db()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT *
+            FROM plans
+            ORDER BY id
+        """)
+
+        plans = cur.fetchall()
+        conn.close()
+
+        lines = ["💎 <b>پلن‌های VPN</b>\n"]
+
+        for plan in plans:
+            status = "فعال" if plan["active"] else "غیرفعال"
+
+            lines.append(
+                f"#{plan['id']} — {plan['name']}\n"
+                f"📦 {plan['volume_gb']}GB | "
+                f"⏳ {plan['duration_days']} روز | "
+                f"💰 {plan['price']:,}\n"
+                f"📌 {status}\n"
             )
+
+        bot.edit_message_text(
+            "\n".join(lines),
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=admin_menu()
         )
+
+    elif data == "admin_payments":
+        conn = db()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM payments
+            WHERE status = 'pending'
+        """)
+
+        pending = cur.fetchone()[0]
+        conn.close()
+
+        bot.answer_callback_query(call.id)
 
         bot.send_message(
-            SUPERADMIN_ID,
-            f"""
-💳 <b>رسید پرداخت جدید</b>
-
-🧾 شماره:
-#{payment_id}
-
-👤 کاربر:
-<code>{message.from_user.id}</code>
-
-💰 مبلغ:
-<b>{plan['price']:,} تومان</b>
-""",
-            reply_markup=markup
+            call.message.chat.id,
+            "💰 <b>پرداخت‌ها</b>\n\n"
+            f"⏳ پرداخت‌های در انتظار بررسی: <b>{pending}</b>"
         )
 
-        bot.send_photo(
-            SUPERADMIN_ID,
-            message.photo[-1].file_id
-        )
-
-
-def approve_payment(payment_id):
-
-    con = db()
-
-    payment = con.execute(
-        """
-        SELECT *
-        FROM payments
-        WHERE id=?
-        """,
-        (payment_id,)
-    ).fetchone()
-
-    if not payment:
-        con.close()
-        return
-
-    if payment["status"] != "pending":
-        con.close()
-        return
-
-    plan = con.execute(
-        """
-        SELECT *
-        FROM plans
-        WHERE id=?
-        """,
-        (payment["plan_id"],)
-    ).fetchone()
-
-    expires = datetime.utcnow() + __import__("datetime").timedelta(
-        days=plan["duration_days"]
-    )
-
-    con.execute(
-        """
-        UPDATE payments
-        SET status='approved'
-        WHERE id=?
-        """,
-        (payment_id,)
-    )
-
-    con.execute(
-        """
-        INSERT INTO services
-        (
-            user_id,
-            plan_id,
-            status,
-            config,
-            expires_at,
-            created_at
-        )
-        VALUES (?, ?, 'active', ?, ?, ?)
-        """,
-        (
-            payment["user_id"],
-            payment["plan_id"],
-            "PASARGUARD_PENDING",
-            expires.isoformat(),
-            datetime.utcnow().isoformat()
-        )
-    )
-
-    con.execute(
-        """
-        INSERT INTO transactions
-        (
-            user_id,
-            amount,
-            kind,
-            description,
-            created_at
-        )
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (
-            payment["user_id"],
-            -payment["amount"],
-            "purchase",
-            f"خرید پلن #{payment['plan_id']}",
-            datetime.utcnow().isoformat()
-        )
-    )
-
-    con.commit()
-    con.close()
-
-    bot.send_message(
-        payment["user_id"],
-        """
-✅ <b>پرداخت تأیید شد.</b>
-
-سرویس شما ثبت شد.
-
-⚠️ اتصال نهایی به PasarGuard در مرحله اتصال API انجام می‌شود.
-"""
-    )
-
-
-def reject_payment(payment_id):
-
-    con = db()
-
-    payment = con.execute(
-        """
-        SELECT *
-        FROM payments
-        WHERE id=?
-        """,
-        (payment_id,)
-    ).fetchone()
-
-    if payment and payment["status"] == "pending":
-
-        con.execute(
-            """
-            UPDATE payments
-            SET status='rejected'
-            WHERE id=?
-            """,
-            (payment_id,)
-        )
-
-        con.commit()
-
-    con.close()
-
-    if payment:
+    else:
+        bot.answer_callback_query(call.id)
 
         bot.send_message(
-            payment["user_id"],
-            f"""
-❌ <b>پرداخت #{payment_id} رد شد.</b>
-
-اگر فکر می‌کنی اشتباهی رخ داده، با پشتیبانی تماس بگیر.
-"""
+            call.message.chat.id,
+            f"🛠 بخش <b>{data}</b>\n\n"
+            "این بخش در مرحله بعد به‌صورت کامل پیاده‌سازی می‌شود."
         )
 
 
-def save_card_number(message):
+# =========================
+# OTHER CALLBACKS
+# =========================
 
-    set_setting(
-        "card_number",
-        message.text.strip()
-    )
+@bot.callback_query_handler(func=lambda call: True)
+def general_callbacks(call):
+
+    if call.data == "close":
+        try:
+            bot.delete_message(
+                call.message.chat.id,
+                call.message.message_id
+            )
+        except Exception:
+            pass
+
+        bot.answer_callback_query(call.id)
+
+    elif call.data == "back_buy":
+        bot.answer_callback_query(call.id)
+        buy_vpn(call.message)
+
+    elif call.data == "wallet_charge":
+        bot.answer_callback_query(call.id)
+
+        bot.send_message(
+            call.message.chat.id,
+            "➕ <b>شارژ حساب</b>\n\n"
+            "روش پرداخت را انتخاب کنید."
+        )
+
+    elif call.data == "wallet_transactions":
+        bot.answer_callback_query(call.id)
+        transactions(call.message)
+
+    else:
+        bot.answer_callback_query(call.id)
+
+
+# =========================
+# UNKNOWN MESSAGE
+# =========================
+
+@bot.message_handler(
+    func=lambda message: True,
+    content_types=["text"]
+)
+def unknown_message(message):
+
+    if message.text.startswith("/"):
+        return
+
+    save_user(message)
 
     bot.send_message(
         message.chat.id,
-        "✅ شماره کارت ذخیره شد."
+        "👇 از منوی زیر انتخاب کنید:",
+        reply_markup=user_menu()
     )
-
-    admin_menu(message)
-
-
-def save_card_name(message):
-
-    set_setting(
-        "card_name",
-        message.text.strip()
-    )
-
-    bot.send_message(
-        message.chat.id,
-        "✅ نام صاحب کارت ذخیره شد."
-    )
-
-    admin_menu(message)
 
 
 # =========================
@@ -1335,16 +962,11 @@ def save_card_name(message):
 # =========================
 
 if __name__ == "__main__":
+    create_database()
 
-    init_db()
-
-    print("🔥 VirangarVPN is running...")
+    print("🔥 VirangarVPN Bot is running...")
 
     bot.infinity_polling(
         skip_pending=True,
-        allowed_updates=[
-            "message",
-            "callback_query"
-        ]
+        allowed_updates=["message", "callback_query"]
     )
-PY
